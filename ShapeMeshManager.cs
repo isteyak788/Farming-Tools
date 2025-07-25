@@ -3,6 +3,7 @@ using UnityEngine;
 using UnityEngine.EventSystems; // Required for UI checks
 using UnityEngine.UI; // REQUIRED for Button type
 using System; // Required for Type
+using System.Collections; // Required for Coroutines
 
 [RequireComponent(typeof(MeshFilter), typeof(MeshRenderer))]
 public class ShapeMeshManager : MonoBehaviour
@@ -49,6 +50,20 @@ public class ShapeMeshManager : MonoBehaviour
     [Range(0, 90)]
     public float maxSlopeAngle = 45f; // Default max slope angle
 
+    // NEW: Invalid Placement UI Settings
+    [Header("Invalid Placement UI")]
+    [Tooltip("Drag UI GameObjects (e.g., text, image panels) here to be enabled when an invalid slope is detected.")]
+    public GameObject[] invalidPlacementUIElements;
+    [Tooltip("Duration in seconds that the invalid placement UI will remain visible.")]
+    public float invalidUINoticeDuration = 2.0f; // Default to 2 seconds
+
+    // NEW: Child Object Settings - ADDED THESE FIELDS
+    [Header("Child Object Settings")]
+    [Tooltip("Toggle to enable/disable spawning child objects.")]
+    public bool spawnChildObjects = false;
+    [Tooltip("Drag prefabs or GameObjects here to be spawned as children of the generated mesh.")]
+    public GameObject[] childObjectsToSpawn;
+
     // Components to copy to the generated mesh
     [Header("Dynamic Components")]
     [Tooltip("Drag and drop components (e.g., Rigidbody, Collider, your custom scripts) from other GameObjects here. Their type and *serializable* data will be copied to the generated mesh. Note: Only serializable fields will be copied.")]
@@ -74,6 +89,8 @@ public class ShapeMeshManager : MonoBehaviour
     private Vector3 _lastValidEndDragPoint;
     private bool _isCurrentlyInvalidSlope = false;
 
+    private Coroutine _fadeInvalidUICoroutine; // To manage the UI fade-out
+
 
     void Awake()
     {
@@ -81,13 +98,16 @@ public class ShapeMeshManager : MonoBehaviour
         previewMeshRenderer = GetComponent<MeshRenderer>();
         previewMeshRenderer.enabled = false;
 
+        // Ensure UI elements are initially disabled
+        DisableInvalidPlacementUI();
+
         if (meshMaterial == null)
         {
             Debug.LogError("Mesh Material is not assigned in ShapeMeshManager. Please assign one in the Inspector.");
         }
         if (invalidMaterial == null)
         {
-            Debug.LogWarning("Invalid Material is not assigned in ShapeMeshManager. Shapes on invalid slopes will use the regular mesh material for finalization and a warning will be logged.");
+            Debug.LogWarning("Invalid Material is not assigned in ShapeMeshManager. Shapes on invalid slopes will use the regular mesh material for preview/finalization and a warning will be logged.");
         }
     }
 
@@ -261,6 +281,12 @@ public class ShapeMeshManager : MonoBehaviour
         isDrawingSessionActive = false;
         _activeDrawingType = DrawingType.None; // Reset active drawing type
         _isCurrentlyInvalidSlope = false; // Reset slope status
+        DisableInvalidPlacementUI(); // Ensure UI is hidden when session ends
+        if (_fadeInvalidUICoroutine != null)
+        {
+            StopCoroutine(_fadeInvalidUICoroutine);
+            _fadeInvalidUICoroutine = null;
+        }
     }
 
     private void SetupPreviewMesh()
@@ -341,6 +367,14 @@ public class ShapeMeshManager : MonoBehaviour
             }
             // Clamp currentDragPoint to the last valid point
             pointToDrawWith = _lastValidEndDragPoint;
+
+            // Show UI and start fade-out coroutine
+            EnableInvalidPlacementUI();
+            if (_fadeInvalidUICoroutine != null)
+            {
+                StopCoroutine(_fadeInvalidUICoroutine);
+            }
+            _fadeInvalidUICoroutine = StartCoroutine(FadeOutInvalidPlacementUI(invalidUINoticeDuration));
         }
         else
         {
@@ -348,6 +382,14 @@ public class ShapeMeshManager : MonoBehaviour
             previewMeshRenderer.material = meshMaterial;
             _lastValidEndDragPoint = currentDragPoint; // Update last valid point
             pointToDrawWith = currentDragPoint; // Use the actual current drag point
+
+            // Hide UI immediately if moving to a valid spot
+            DisableInvalidPlacementUI();
+            if (_fadeInvalidUICoroutine != null)
+            {
+                StopCoroutine(_fadeInvalidUICoroutine);
+                _fadeInvalidUICoroutine = null;
+            }
         }
 
         // Generate the preview mesh using the potentially clamped pointToDrawWith
@@ -377,8 +419,6 @@ public class ShapeMeshManager : MonoBehaviour
     private void FinalizeShapeMesh(Vector3 p1, Vector3 p2)
     {
         // One final check for slope validity at the moment of release.
-        // This is important because the user might have released on an invalid spot
-        // after dragging back into a valid area or vice versa.
         List<Vector3> pointsForFinalSlopeCheck = new List<Vector3>();
         if (_activeDrawingType == DrawingType.Box)
         {
@@ -441,7 +481,20 @@ public class ShapeMeshManager : MonoBehaviour
         MeshCollider newMeshCollider = finalizedMeshGameObject.AddComponent<MeshCollider>();
         newMeshCollider.convex = makeConvex;
 
-        finalizedMeshGameObject.transform.position = this.transform.position;
+        // --- PIVOT CENTERING LOGIC ---
+        Vector3 shapeCenterWorld;
+        if (_activeDrawingType == DrawingType.Box)
+        {
+            shapeCenterWorld = (p1 + p2) / 2f;
+            shapeCenterWorld.y = (p1.y + p2.y) / 2f; 
+        }
+        else // Circle
+        {
+            shapeCenterWorld = p1; 
+        }
+
+        // Set the GameObject's position to the calculated center of the shape
+        finalizedMeshGameObject.transform.position = shapeCenterWorld;
 
         if (_activeDrawingType == DrawingType.Box)
         {
@@ -466,7 +519,27 @@ public class ShapeMeshManager : MonoBehaviour
         newMeshCollider.sharedMesh = newMeshFilter.mesh;
         AddComponentsToMeshGameObject(finalizedMeshGameObject);
 
-        Debug.Log(finalizedMeshGameObject.name + " generated with " + newMeshFilter.mesh.vertexCount + " vertices and " + newMeshFilter.mesh.triangles.Length / 3 + " triangles.");
+        // Spawn Child Objects based on toggle
+        if (spawnChildObjects && childObjectsToSpawn != null && childObjectsToSpawn.Length > 0)
+        {
+            foreach (GameObject childPrefab in childObjectsToSpawn)
+            {
+                if (childPrefab != null)
+                {
+                    GameObject childInstance = Instantiate(childPrefab, finalizedMeshGameObject.transform);
+                    childInstance.transform.localPosition = Vector3.zero; // Place at the parent's pivot by default
+                    childInstance.transform.localRotation = Quaternion.identity;
+                    Debug.Log($"Spawned child object '{childPrefab.name}' under '{finalizedMeshGameObject.name}'.");
+                }
+                else
+                {
+                    Debug.LogWarning("Skipping null child object in 'Child Objects To Spawn' list. Ensure all slots are filled.");
+                }
+            }
+        }
+
+        Debug.Log(finalizedMeshGameObject.name + " generated with " + newMeshFilter.mesh.vertexCount + " vertices and " + newMeshFilter.mesh.triangles.Length / 3 + " triangles." +
+                  $" Pivot set to center at world position: {finalizedMeshGameObject.transform.position}");
     }
 
     /// <summary>
@@ -477,15 +550,13 @@ public class ShapeMeshManager : MonoBehaviour
     private bool CheckSlopeValidity(Vector3 worldPoint)
     {
         RaycastHit hit;
-        // Adjust the ray origin to ensure it's above any potential terrain irregularities or the drawn shape itself
-        Vector3 rayOrigin = new Vector3(worldPoint.x, Camera.main.transform.position.y + 10f, worldPoint.z); // Start from high above
+        Vector3 rayOrigin = new Vector3(worldPoint.x, Camera.main.transform.position.y + 10f, worldPoint.z);
 
         if (Physics.Raycast(rayOrigin, Vector3.down, out hit, Mathf.Infinity, groundLayer))
         {
             float angle = Vector3.Angle(Vector3.up, hit.normal);
             return angle <= maxSlopeAngle;
         }
-        // If the raycast doesn't hit the ground, we can't determine slope, so consider it invalid for placement.
         return false;
     }
 
@@ -531,7 +602,7 @@ public class ShapeMeshManager : MonoBehaviour
 
     private void GenerateCircleMesh(Mesh mesh, Vector3 centerPoint, Vector3 currentMousePoint, Transform relativeTransform, bool isPreview)
     {
-        Vector3 flatCenter = new Vector3(centerPoint.x, currentMousePoint.y, centerPoint.z); // Use currentMousePoint.y for calculation consistency
+        Vector3 flatCenter = new Vector3(centerPoint.x, currentMousePoint.y, centerPoint.z); 
         Vector3 flatMouse = new Vector3(currentMousePoint.x, currentMousePoint.y, currentMousePoint.z);
         float radius = Vector3.Distance(flatCenter, flatMouse);
 
@@ -539,33 +610,32 @@ public class ShapeMeshManager : MonoBehaviour
         List<int> triangles = new List<int>();
         List<Vector2> uvs = new List<Vector2>();
 
-        Vector3 localCenterVertex = relativeTransform.InverseTransformPoint(centerPoint);
-        vertices.Add(localCenterVertex);
-        uvs.Add(new Vector2(0.5f, 0.5f));
+        vertices.Add(Vector3.zero); 
+        uvs.Add(new Vector2(0.5f, 0.5f)); 
 
-        for (int i = 0; i <= circleSegments; i++)
+        for (int i = 0; i <= circleSegments; i++) 
         {
             float angle = (float)i / circleSegments * 2 * Mathf.PI;
             float x = centerPoint.x + radius * Mathf.Cos(angle);
             float z = centerPoint.z + radius * Mathf.Sin(angle);
 
-            Vector3 circlePoint = new Vector3(x, centerPoint.y, z); // Start with centerPoint's Y
+            Vector3 circlePointWorld = new Vector3(x, centerPoint.y, z); 
 
             RaycastHit hit;
-            Vector3 rayOrigin = new Vector3(circlePoint.x, Camera.main.transform.position.y + 100f, circlePoint.z); // Ray from high above
+            Vector3 rayOrigin = new Vector3(circlePointWorld.x, Camera.main.transform.position.y + 100f, circlePointWorld.z); 
             float raycastDistance = Camera.main.transform.position.y + 200f;
 
             if (Physics.Raycast(rayOrigin, Vector3.down, out hit, raycastDistance, groundLayer))
             {
-                circlePoint.y = hit.point.y + groundOffset;
+                circlePointWorld.y = hit.point.y + groundOffset;
             }
             else
             {
-                Debug.LogWarning($"Circle point at X:{circlePoint.x}, Z:{circlePoint.z} did not hit ground during mesh generation. Point will use the y-coordinate of the center point.");
-                circlePoint.y = centerPoint.y;
+                Debug.LogWarning($"Circle point at X:{circlePointWorld.x}, Z:{circlePointWorld.z} did not hit ground during mesh generation. Point will use the y-coordinate of the center point.");
+                circlePointWorld.y = centerPoint.y; // Fallback
             }
 
-            vertices.Add(relativeTransform.InverseTransformPoint(circlePoint));
+            vertices.Add(relativeTransform.InverseTransformPoint(circlePointWorld));
             uvs.Add(new Vector2(0.5f + 0.5f * Mathf.Cos(angle), 0.5f + 0.5f * Mathf.Sin(angle)));
         }
 
@@ -573,8 +643,7 @@ public class ShapeMeshManager : MonoBehaviour
         for (int i = 1; i <= circleSegments; i++)
         {
             int currentOuter = i;
-            // The nextOuter should wrap around to the first outer vertex (index 1) when i is circleSegments
-            int nextOuter = (i == circleSegments) ? 1 : i + 1;
+            int nextOuter = (i == circleSegments) ? 1 : i + 1; 
 
             if (!invertMesh)
             {
@@ -633,6 +702,43 @@ public class ShapeMeshManager : MonoBehaviour
             else
             {
                 Debug.LogWarning($"The object in 'Components To Copy' slot for '{componentType.Name}' is not a concrete Unity Component type that can be added to a GameObject. Please ensure you are dragging a specific component instance (e.g., Rigidbody, not a generic Component).");
+            }
+        }
+    }
+
+    // NEW: Coroutine to fade out (disable) the invalid placement UI
+    private IEnumerator FadeOutInvalidPlacementUI(float delay)
+    {
+        yield return new WaitForSeconds(delay);
+        DisableInvalidPlacementUI();
+    }
+
+    // NEW: Helper method to enable the invalid placement UI
+    private void EnableInvalidPlacementUI()
+    {
+        if (invalidPlacementUIElements != null)
+        {
+            foreach (GameObject uiElement in invalidPlacementUIElements)
+            {
+                if (uiElement != null)
+                {
+                    uiElement.SetActive(true);
+                }
+            }
+        }
+    }
+
+    // NEW: Helper method to disable the invalid placement UI
+    private void DisableInvalidPlacementUI()
+    {
+        if (invalidPlacementUIElements != null)
+        {
+            foreach (GameObject uiElement in invalidPlacementUIElements)
+            {
+                if (uiElement != null)
+                {
+                    uiElement.SetActive(false);
+                }
             }
         }
     }
