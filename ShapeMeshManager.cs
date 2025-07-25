@@ -11,23 +11,19 @@ public class ShapeMeshManager : MonoBehaviour
     [Tooltip("Check this box ONLY for the ShapeMeshManager GameObject you place directly in the scene. This instance will manage spawning new meshes.")]
     public bool isSpawner = false;
 
-    // NEW: Toggle for drawing mode
-    [Header("Drawing Mode")]
-    public DrawingMode currentDrawingMode = DrawingMode.BoxDraw; // Default mode
-
-    public enum DrawingMode
-    {
-        BoxDraw,
-        CircleDraw
-    }
-
+    // NEW: Separate arrays for activating drawing modes
     [Header("Activation Settings")]
-    [Tooltip("Drag the UI Buttons here that should activate drawing.")]
-    public Button[] activateDrawingButtons;
+    [Tooltip("Drag the UI Buttons here that should activate BOX drawing.")]
+    public Button[] activateBoxDrawingButtons;
+    [Tooltip("Drag the UI Buttons here that should activate CIRCLE drawing.")]
+    public Button[] activateCircleDrawingButtons;
 
     [Header("Mesh Creation Settings")]
     [Tooltip("Material for the generated mesh. IMPORTANT: Assign a visible material here.")]
     public Material meshMaterial;
+
+    [Tooltip("Material to use if the generated mesh is on an invalid slope.")]
+    public Material invalidMaterial;
 
     [Header("Normal Settings")]
     [Tooltip("If true, the mesh normals will be inverted (making the inside surface visible from the outside).")]
@@ -43,10 +39,15 @@ public class ShapeMeshManager : MonoBehaviour
     [Tooltip("If true, the MeshCollider will be marked as convex. Convex MeshColliders can interact with other convex colliders.")]
     public bool makeConvex = false;
 
-    [Header("Circle Draw Settings")] // NEW: Settings for circle drawing
+    [Header("Circle Draw Settings")] // Settings for circle drawing
     [Tooltip("Number of segments for the circle mesh. Higher values make the circle smoother.")]
     [Range(8, 64)]
     public int circleSegments = 32;
+
+    [Header("Slope Detection Settings")] // Slope detection settings
+    [Tooltip("Maximum angle (in degrees) from vertical that the ground can have for the shape to be considered on a valid slope.")]
+    [Range(0, 90)]
+    public float maxSlopeAngle = 45f; // Default max slope angle
 
     // Components to copy to the generated mesh
     [Header("Dynamic Components")]
@@ -60,24 +61,63 @@ public class ShapeMeshManager : MonoBehaviour
 
     private static ShapeMeshManager currentDrawingInstance;
     private static bool isDrawingSessionActive = false;
+    private DrawingType _activeDrawingType = DrawingType.None; // New internal state for active drawing type
+
+    private enum DrawingType
+    {
+        None,
+        Box,
+        Circle
+    }
+
+    // Store the last valid end drag point for clamping size
+    private Vector3 _lastValidEndDragPoint;
+    private bool _isCurrentlyInvalidSlope = false;
+
 
     void Awake()
     {
         previewMeshFilter = GetComponent<MeshFilter>();
         previewMeshRenderer = GetComponent<MeshRenderer>();
         previewMeshRenderer.enabled = false;
+
+        if (meshMaterial == null)
+        {
+            Debug.LogError("Mesh Material is not assigned in ShapeMeshManager. Please assign one in the Inspector.");
+        }
+        if (invalidMaterial == null)
+        {
+            Debug.LogWarning("Invalid Material is not assigned in ShapeMeshManager. Shapes on invalid slopes will use the regular mesh material for finalization and a warning will be logged.");
+        }
     }
 
     void OnEnable()
     {
-        if (isSpawner && activateDrawingButtons != null)
+        if (isSpawner)
         {
-            foreach (Button button in activateDrawingButtons)
+            // Subscribe for Box Drawing buttons
+            if (activateBoxDrawingButtons != null)
             {
-                if (button != null)
+                foreach (Button button in activateBoxDrawingButtons)
                 {
-                    button.onClick.AddListener(StartNewDrawingSessionFromButton);
-                    Debug.Log($"Subscribed to '{button.name}' click event.");
+                    if (button != null)
+                    {
+                        button.onClick.AddListener(StartNewBoxDrawingSession);
+                        Debug.Log($"Subscribed to '{button.name}' for Box Drawing.");
+                    }
+                }
+            }
+
+            // Subscribe for Circle Drawing buttons
+            if (activateCircleDrawingButtons != null)
+            {
+                foreach (Button button in activateCircleDrawingButtons)
+                {
+                    if (button != null)
+                    {
+                        button.onClick.AddListener(StartNewCircleDrawingSession);
+                        Debug.Log($"Subscribed to '{button.name}' for Circle Drawing.");
+                    }
                 }
             }
         }
@@ -85,14 +125,31 @@ public class ShapeMeshManager : MonoBehaviour
 
     void OnDisable()
     {
-        if (isSpawner && activateDrawingButtons != null)
+        if (isSpawner)
         {
-            foreach (Button button in activateDrawingButtons)
+            // Unsubscribe for Box Drawing buttons
+            if (activateBoxDrawingButtons != null)
             {
-                if (button != null)
+                foreach (Button button in activateBoxDrawingButtons)
                 {
-                    button.onClick.RemoveListener(StartNewDrawingSessionFromButton);
-                    Debug.Log($"Unsubscribed from '{button.name}' click event.");
+                    if (button != null)
+                    {
+                        button.onClick.RemoveListener(StartNewBoxDrawingSession);
+                        Debug.Log($"Unsubscribed from '{button.name}' for Box Drawing.");
+                    }
+                }
+            }
+
+            // Unsubscribe for Circle Drawing buttons
+            if (activateCircleDrawingButtons != null)
+            {
+                foreach (Button button in activateCircleDrawingButtons)
+                {
+                    if (button != null)
+                    {
+                        button.onClick.RemoveListener(StartNewCircleDrawingSession);
+                        Debug.Log($"Unsubscribed from '{button.name}' for Circle Drawing.");
+                    }
                 }
             }
         }
@@ -105,7 +162,7 @@ public class ShapeMeshManager : MonoBehaviour
             return;
         }
 
-        if (isSpawner && isDrawingSessionActive)
+        if (isSpawner && isDrawingSessionActive && _activeDrawingType != DrawingType.None)
         {
             Ray ray = Camera.main.ScreenPointToRay(Input.mousePosition);
             RaycastHit hit;
@@ -116,9 +173,11 @@ public class ShapeMeshManager : MonoBehaviour
                 if (Physics.Raycast(ray, out hit, Mathf.Infinity, groundLayer))
                 {
                     startDragPoint = hit.point + Vector3.up * groundOffset;
+                    _lastValidEndDragPoint = startDragPoint.Value; // Initialize last valid point
+                    _isCurrentlyInvalidSlope = false; // Reset slope status
                     currentDrawingInstance = this;
                     SetupPreviewMesh();
-                    Debug.Log($"{currentDrawingMode} drawing started.");
+                    Debug.Log($"{_activeDrawingType} drawing started.");
                 }
                 else
                 {
@@ -139,45 +198,54 @@ public class ShapeMeshManager : MonoBehaviour
             {
                 if (Physics.Raycast(ray, out hit, Mathf.Infinity, groundLayer))
                 {
-                    Vector3 endDragPoint = hit.point + Vector3.up * groundOffset;
-                    FinalizeShapeMesh(startDragPoint.Value, endDragPoint);
-                    CleanupPreviewMesh();
-                    startDragPoint = null;
-                    isDrawingSessionActive = false;
-                    Debug.Log($"{currentDrawingMode} mesh finalized and spawner reset. Ready for next mesh.");
+                    // For finalization, use the _lastValidEndDragPoint if it's currently invalid,
+                    // otherwise use the current endDragPoint.
+                    Vector3 endDragPointForFinalization = _isCurrentlyInvalidSlope ? _lastValidEndDragPoint : (hit.point + Vector3.up * groundOffset);
+                    
+                    FinalizeShapeMesh(startDragPoint.Value, endDragPointForFinalization);
+                    CleanupDrawingSession(); // New method to clean up all session state
+                    Debug.Log($"{_activeDrawingType} drawing session ended.");
                 }
                 else
                 {
                     Debug.LogWarning("Mouse released but did not hit any object on the specified Ground Layer!");
-                    CleanupPreviewMesh();
-                    startDragPoint = null;
-                    isDrawingSessionActive = false;
+                    CleanupDrawingSession();
                 }
             }
 
             // Reset drawing with 'R' key
             if (Input.GetKeyDown(KeyCode.R))
             {
-                CleanupPreviewMesh();
-                startDragPoint = null;
-                isDrawingSessionActive = false;
-                Debug.Log("Drawing reset.");
+                CleanupDrawingSession();
+                Debug.Log("Drawing reset by R key.");
             }
         }
     }
 
-    public void StartNewDrawingSessionFromButton()
+    // NEW: Separate methods for starting box/circle drawing
+    public void StartNewBoxDrawingSession()
+    {
+        StartNewDrawingSession(DrawingType.Box);
+    }
+
+    public void StartNewCircleDrawingSession()
+    {
+        StartNewDrawingSession(DrawingType.Circle);
+    }
+
+    private void StartNewDrawingSession(DrawingType type)
     {
         if (isSpawner)
         {
             if (!isDrawingSessionActive)
             {
                 isDrawingSessionActive = true;
-                Debug.Log($"Drawing session activated for {currentDrawingMode}. Click and drag on the ground to draw.");
+                _activeDrawingType = type;
+                Debug.Log($"Drawing session activated for {_activeDrawingType}. Click and drag on the ground to draw.");
             }
             else
             {
-                Debug.LogWarning("Cannot start a new drawing session. An existing drawing is in progress. Please finalize or reset the current drawing.");
+                Debug.LogWarning($"Cannot start a new drawing session for {type}. An existing drawing session for {_activeDrawingType} is in progress. Please finalize or reset the current drawing.");
             }
         }
         else
@@ -186,22 +254,110 @@ public class ShapeMeshManager : MonoBehaviour
         }
     }
 
+    private void CleanupDrawingSession()
+    {
+        CleanupPreviewMesh();
+        startDragPoint = null;
+        isDrawingSessionActive = false;
+        _activeDrawingType = DrawingType.None; // Reset active drawing type
+        _isCurrentlyInvalidSlope = false; // Reset slope status
+    }
+
     private void SetupPreviewMesh()
     {
         previewMeshFilter.mesh = new Mesh();
-        previewMeshRenderer.material = meshMaterial;
         previewMeshRenderer.enabled = true;
+        previewMeshRenderer.material = meshMaterial; // Start with valid material
     }
 
-    private void UpdatePreviewMesh(Vector3 p1, Vector3 p2)
+    private void UpdatePreviewMesh(Vector3 p1, Vector3 currentDragPoint)
     {
-        if (currentDrawingMode == DrawingMode.BoxDraw)
+        List<Vector3> pointsForSlopeCheck = new List<Vector3>();
+        Vector3 pointToDrawWith = currentDragPoint; // This will be the actual point used for mesh generation
+
+        // Determine potential points for slope check based on active drawing mode
+        if (_activeDrawingType == DrawingType.Box)
         {
-            GenerateQuadMesh(previewMeshFilter.mesh, p1, p2, transform, true); // True for preview (no new gameobject)
+            // For box, check the 4 corners
+            Vector3 c1 = new Vector3(Mathf.Min(p1.x, currentDragPoint.x), currentDragPoint.y, Mathf.Min(p1.z, currentDragPoint.z));
+            Vector3 c2 = new Vector3(Mathf.Max(p1.x, currentDragPoint.x), currentDragPoint.y, Mathf.Min(p1.z, currentDragPoint.z));
+            Vector3 c3 = new Vector3(Mathf.Min(p1.x, currentDragPoint.x), currentDragPoint.y, Mathf.Max(p1.z, currentDragPoint.z));
+            Vector3 c4 = new Vector3(Mathf.Max(p1.x, currentDragPoint.x), currentDragPoint.y, Mathf.Max(p1.z, currentDragPoint.z));
+            pointsForSlopeCheck.AddRange(new Vector3[] { c1, c2, c3, c4 });
         }
-        else if (currentDrawingMode == DrawingMode.CircleDraw)
+        else if (_activeDrawingType == DrawingType.Circle)
         {
-            GenerateCircleMesh(previewMeshFilter.mesh, p1, p2, transform, true); // True for preview
+            // For circle, check the center and 8 points on circumference
+            Vector3 flatCenter = new Vector3(p1.x, p1.y, p1.z);
+            Vector3 flatMouse = new Vector3(currentDragPoint.x, p1.y, currentDragPoint.z);
+            float radius = Vector3.Distance(flatCenter, flatMouse);
+
+            pointsForSlopeCheck.Add(p1); // Center point
+
+            int numCheckPoints = Mathf.Min(8, circleSegments);
+            for (int i = 0; i < numCheckPoints; i++)
+            {
+                float angle = (float)i / numCheckPoints * 2 * Mathf.PI;
+                float x = p1.x + radius * Mathf.Cos(angle);
+                float z = p1.z + radius * Mathf.Sin(angle);
+
+                // Raycast down from above to get the actual ground Y for slope check
+                Vector3 checkPointRayOrigin = new Vector3(x, Camera.main.transform.position.y + 10f, z);
+                RaycastHit hit;
+                if (Physics.Raycast(checkPointRayOrigin, Vector3.down, out hit, Mathf.Infinity, groundLayer))
+                {
+                    pointsForSlopeCheck.Add(hit.point + Vector3.up * groundOffset);
+                }
+                else
+                {
+                    // Fallback if raycast fails, point will be at p1's y-level for slope check
+                    pointsForSlopeCheck.Add(new Vector3(x, p1.y, z));
+                }
+            }
+        }
+
+        // Check slope validity
+        bool isAnySlopeInvalid = false;
+        foreach (Vector3 point in pointsForSlopeCheck)
+        {
+            if (!CheckSlopeValidity(point))
+            {
+                isAnySlopeInvalid = true;
+                break;
+            }
+        }
+
+        // Apply visual feedback and clamp size if needed
+        if (isAnySlopeInvalid)
+        {
+            _isCurrentlyInvalidSlope = true;
+            if (invalidMaterial != null)
+            {
+                previewMeshRenderer.material = invalidMaterial;
+            }
+            else
+            {
+                previewMeshRenderer.material = meshMaterial; // Fallback to normal material if invalid is not set
+            }
+            // Clamp currentDragPoint to the last valid point
+            pointToDrawWith = _lastValidEndDragPoint;
+        }
+        else
+        {
+            _isCurrentlyInvalidSlope = false;
+            previewMeshRenderer.material = meshMaterial;
+            _lastValidEndDragPoint = currentDragPoint; // Update last valid point
+            pointToDrawWith = currentDragPoint; // Use the actual current drag point
+        }
+
+        // Generate the preview mesh using the potentially clamped pointToDrawWith
+        if (_activeDrawingType == DrawingType.Box)
+        {
+            GenerateQuadMesh(previewMeshFilter.mesh, p1, pointToDrawWith, transform, true);
+        }
+        else if (_activeDrawingType == DrawingType.Circle)
+        {
+            GenerateCircleMesh(previewMeshFilter.mesh, p1, pointToDrawWith, transform, true);
         }
     }
 
@@ -220,7 +376,66 @@ public class ShapeMeshManager : MonoBehaviour
 
     private void FinalizeShapeMesh(Vector3 p1, Vector3 p2)
     {
-        GameObject finalizedMeshGameObject = new GameObject("GeneratedMesh_" + currentDrawingMode.ToString() + "_" + System.DateTime.Now.ToString("HHmmss"));
+        // One final check for slope validity at the moment of release.
+        // This is important because the user might have released on an invalid spot
+        // after dragging back into a valid area or vice versa.
+        List<Vector3> pointsForFinalSlopeCheck = new List<Vector3>();
+        if (_activeDrawingType == DrawingType.Box)
+        {
+            Vector3 c1 = new Vector3(Mathf.Min(p1.x, p2.x), p2.y, Mathf.Min(p1.z, p2.z));
+            Vector3 c2 = new Vector3(Mathf.Max(p1.x, p2.x), p2.y, Mathf.Min(p1.z, p2.z));
+            Vector3 c3 = new Vector3(Mathf.Min(p1.x, p2.x), p2.y, Mathf.Max(p1.z, p2.z));
+            Vector3 c4 = new Vector3(Mathf.Max(p1.x, p2.x), p2.y, Mathf.Max(p1.z, p2.z));
+            pointsForFinalSlopeCheck.AddRange(new Vector3[] { c1, c2, c3, c4 });
+        }
+        else if (_activeDrawingType == DrawingType.Circle)
+        {
+            Vector3 flatCenter = new Vector3(p1.x, p2.y, p1.z);
+            Vector3 flatMouse = new Vector3(p2.x, p2.y, p2.z);
+            float radius = Vector3.Distance(flatCenter, flatMouse);
+
+            pointsForFinalSlopeCheck.Add(p1); // Center point
+
+            int numCheckPoints = Mathf.Min(8, circleSegments);
+            for (int i = 0; i < numCheckPoints; i++)
+            {
+                float angle = (float)i / numCheckPoints * 2 * Mathf.PI;
+                float x = p1.x + radius * Mathf.Cos(angle);
+                float z = p1.z + radius * Mathf.Sin(angle);
+
+                Vector3 checkPointRayOrigin = new Vector3(x, Camera.main.transform.position.y + 10f, z);
+                RaycastHit hit;
+                if (Physics.Raycast(checkPointRayOrigin, Vector3.down, out hit, Mathf.Infinity, groundLayer))
+                {
+                    pointsForFinalSlopeCheck.Add(hit.point + Vector3.up * groundOffset);
+                }
+                else
+                {
+                    pointsForFinalSlopeCheck.Add(new Vector3(x, p1.y, z));
+                }
+            }
+        }
+
+        bool finalSlopeCheckInvalid = false;
+        foreach (Vector3 point in pointsForFinalSlopeCheck)
+        {
+            if (!CheckSlopeValidity(point))
+            {
+                finalSlopeCheckInvalid = true;
+                break;
+            }
+        }
+
+        // If the final check on release shows invalid slope, abort creation.
+        if (finalSlopeCheckInvalid)
+        {
+            Debug.LogWarning($"Placement on invalid slope detected at release for {_activeDrawingType}. Mesh creation aborted.");
+            return;
+        }
+
+
+        // Proceed with creating the mesh only if the slope is valid at the point of release
+        GameObject finalizedMeshGameObject = new GameObject("GeneratedMesh_" + _activeDrawingType.ToString() + "_" + System.DateTime.Now.ToString("HHmmss"));
         MeshFilter newMeshFilter = finalizedMeshGameObject.AddComponent<MeshFilter>();
         MeshRenderer newMeshRenderer = finalizedMeshGameObject.AddComponent<MeshRenderer>();
         MeshCollider newMeshCollider = finalizedMeshGameObject.AddComponent<MeshCollider>();
@@ -228,15 +443,16 @@ public class ShapeMeshManager : MonoBehaviour
 
         finalizedMeshGameObject.transform.position = this.transform.position;
 
-        if (currentDrawingMode == DrawingMode.BoxDraw)
+        if (_activeDrawingType == DrawingType.Box)
         {
-            GenerateQuadMesh(newMeshFilter.mesh, p1, p2, finalizedMeshGameObject.transform, false); // False for final mesh (uses new gameobject)
+            GenerateQuadMesh(newMeshFilter.mesh, p1, p2, finalizedMeshGameObject.transform, false);
         }
-        else if (currentDrawingMode == DrawingMode.CircleDraw)
+        else if (_activeDrawingType == DrawingType.Circle)
         {
-            GenerateCircleMesh(newMeshFilter.mesh, p1, p2, finalizedMeshGameObject.transform, false); // False for final mesh
+            GenerateCircleMesh(newMeshFilter.mesh, p1, p2, finalizedMeshGameObject.transform, false);
         }
 
+        // Apply the valid material for the finalized mesh
         if (meshMaterial != null)
         {
             newMeshRenderer.material = meshMaterial;
@@ -253,13 +469,33 @@ public class ShapeMeshManager : MonoBehaviour
         Debug.Log(finalizedMeshGameObject.name + " generated with " + newMeshFilter.mesh.vertexCount + " vertices and " + newMeshFilter.mesh.triangles.Length / 3 + " triangles.");
     }
 
-    // Renamed from GenerateBoxMesh to be more generic for quad generation
+    /// <summary>
+    /// Checks if the ground slope at a given world point is within the allowed angle.
+    /// </summary>
+    /// <param name="worldPoint">The world position to check.</param>
+    /// <returns>True if the slope is valid, false otherwise.</returns>
+    private bool CheckSlopeValidity(Vector3 worldPoint)
+    {
+        RaycastHit hit;
+        // Adjust the ray origin to ensure it's above any potential terrain irregularities or the drawn shape itself
+        Vector3 rayOrigin = new Vector3(worldPoint.x, Camera.main.transform.position.y + 10f, worldPoint.z); // Start from high above
+
+        if (Physics.Raycast(rayOrigin, Vector3.down, out hit, Mathf.Infinity, groundLayer))
+        {
+            float angle = Vector3.Angle(Vector3.up, hit.normal);
+            return angle <= maxSlopeAngle;
+        }
+        // If the raycast doesn't hit the ground, we can't determine slope, so consider it invalid for placement.
+        return false;
+    }
+
+
     private void GenerateQuadMesh(Mesh mesh, Vector3 p1, Vector3 p2, Transform relativeTransform, bool isPreview)
     {
-        Vector3 c1 = new Vector3(Mathf.Min(p1.x, p2.x), p1.y, Mathf.Min(p1.z, p2.z));
-        Vector3 c2 = new Vector3(Mathf.Max(p1.x, p2.x), p1.y, Mathf.Min(p1.z, p2.z));
-        Vector3 c3 = new Vector3(Mathf.Min(p1.x, p2.x), p1.y, Mathf.Max(p1.z, p2.z));
-        Vector3 c4 = new Vector3(Mathf.Max(p1.x, p2.x), p1.y, Mathf.Max(p1.z, p2.z));
+        Vector3 c1 = new Vector3(Mathf.Min(p1.x, p2.x), p2.y, Mathf.Min(p1.z, p2.z));
+        Vector3 c2 = new Vector3(Mathf.Max(p1.x, p2.x), p2.y, Mathf.Min(p1.z, p2.z));
+        Vector3 c3 = new Vector3(Mathf.Min(p1.x, p2.x), p2.y, Mathf.Max(p1.z, p2.z));
+        Vector3 c4 = new Vector3(Mathf.Max(p1.x, p2.x), p2.y, Mathf.Max(p1.z, p2.z));
 
         Vector3[] vertices = new Vector3[4];
         vertices[0] = relativeTransform.InverseTransformPoint(c1);
@@ -293,36 +529,30 @@ public class ShapeMeshManager : MonoBehaviour
         mesh.RecalculateBounds();
     }
 
-    // NEW: Method for generating a circle mesh
     private void GenerateCircleMesh(Mesh mesh, Vector3 centerPoint, Vector3 currentMousePoint, Transform relativeTransform, bool isPreview)
     {
-        // Calculate radius based on distance from centerPoint to currentMousePoint
-        // Project currentMousePoint to the same Y level as centerPoint for radius calculation
-        Vector3 flatCenter = new Vector3(centerPoint.x, 0, centerPoint.z);
-        Vector3 flatMouse = new Vector3(currentMousePoint.x, 0, currentMousePoint.z);
+        Vector3 flatCenter = new Vector3(centerPoint.x, currentMousePoint.y, centerPoint.z); // Use currentMousePoint.y for calculation consistency
+        Vector3 flatMouse = new Vector3(currentMousePoint.x, currentMousePoint.y, currentMousePoint.z);
         float radius = Vector3.Distance(flatCenter, flatMouse);
 
         List<Vector3> vertices = new List<Vector3>();
         List<int> triangles = new List<int>();
         List<Vector2> uvs = new List<Vector2>();
 
-        // Center vertex
         Vector3 localCenterVertex = relativeTransform.InverseTransformPoint(centerPoint);
         vertices.Add(localCenterVertex);
-        uvs.Add(new Vector2(0.5f, 0.5f)); // Center of UV
+        uvs.Add(new Vector2(0.5f, 0.5f));
 
-        // Outer circle vertices
-        for (int i = 0; i <= circleSegments; i++) // <= to close the loop
+        for (int i = 0; i <= circleSegments; i++)
         {
             float angle = (float)i / circleSegments * 2 * Mathf.PI;
             float x = centerPoint.x + radius * Mathf.Cos(angle);
             float z = centerPoint.z + radius * Mathf.Sin(angle);
 
-            Vector3 circlePoint = new Vector3(x, centerPoint.y, z);
+            Vector3 circlePoint = new Vector3(x, centerPoint.y, z); // Start with centerPoint's Y
 
-            // Project circlePoint to ground
             RaycastHit hit;
-            Vector3 rayOrigin = new Vector3(circlePoint.x, Camera.main.transform.position.y + 100f, circlePoint.z);
+            Vector3 rayOrigin = new Vector3(circlePoint.x, Camera.main.transform.position.y + 100f, circlePoint.z); // Ray from high above
             float raycastDistance = Camera.main.transform.position.y + 200f;
 
             if (Physics.Raycast(rayOrigin, Vector3.down, out hit, raycastDistance, groundLayer))
@@ -331,19 +561,20 @@ public class ShapeMeshManager : MonoBehaviour
             }
             else
             {
-                Debug.LogWarning($"Circle point at X:{circlePoint.x}, Z:{circlePoint.z} did not hit ground. Point will use its calculated Y.");
+                Debug.LogWarning($"Circle point at X:{circlePoint.x}, Z:{circlePoint.z} did not hit ground during mesh generation. Point will use the y-coordinate of the center point.");
+                circlePoint.y = centerPoint.y;
             }
 
             vertices.Add(relativeTransform.InverseTransformPoint(circlePoint));
             uvs.Add(new Vector2(0.5f + 0.5f * Mathf.Cos(angle), 0.5f + 0.5f * Mathf.Sin(angle)));
         }
 
-        // Triangles (fan from center)
         int centerIndex = 0;
         for (int i = 1; i <= circleSegments; i++)
         {
             int currentOuter = i;
-            int nextOuter = (i % circleSegments) + 1; // Ensures loop back to first outer vertex
+            // The nextOuter should wrap around to the first outer vertex (index 1) when i is circleSegments
+            int nextOuter = (i == circleSegments) ? 1 : i + 1;
 
             if (!invertMesh)
             {
