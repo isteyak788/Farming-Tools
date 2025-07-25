@@ -27,6 +27,12 @@ public class LineMeshManager : MonoBehaviour
     [Tooltip("Width of the line drawn by the LineRenderer.")]
     public float lineWidth = 0.1f;
 
+    // NEW: Array for child objects to spawn
+    [Header("Child Object Spawning")]
+    [Tooltip("Drag GameObjects/Prefabs here that will be instantiated as children of the generated mesh.")]
+    public GameObject[] childPrefabsToSpawn;
+
+
     [Header("Curve Settings")]
     [Tooltip("Number of segments per curve section. Higher values make the curve smoother.")]
     [Range(2, 20)]
@@ -548,11 +554,9 @@ public class LineMeshManager : MonoBehaviour
         MeshCollider newMeshCollider = finalizedMeshGameObject.AddComponent<MeshCollider>();
         newMeshCollider.convex = makeConvex; // Set convex based on the public variable [Cite: 1]
 
-
-        // Set the position of the new GameObject to match the spawner's position
-        // This ensures the local space transformation is correct.
-        finalizedMeshGameObject.transform.position = this.transform.position;
-
+        // Set the position of the new GameObject to the calculated centroid.
+        // This makes the centroid the pivot point of the GameObject.
+        finalizedMeshGameObject.transform.position = centroid;
 
         // Convert to local space for mesh, now relative to the new GameObject's transform
         Vector3[] localSplineVertices = new Vector3[splineMeshPoints.Count];
@@ -563,9 +567,10 @@ public class LineMeshManager : MonoBehaviour
         for (int i = 0; i < splineMeshPoints.Count; i++)
         {
             // Now use finalizedMeshGameObject.transform for InverseTransformPoint
-            localSplineVertices[i] = finalizedMeshGameObject.transform.InverseTransformPoint(splineMeshPoints[i]);
-            localInnerSplineVertices[i] = finalizedMeshGameObject.transform.InverseTransformPoint(innerSplinePoints[i]);
-            localInnermostSplineVertices[i] = finalizedMeshGameObject.transform.InverseTransformPoint(innermostSplinePoints[i]);
+            // Subtract the centroid from each vertex to make it relative to the centroid (the new pivot).
+            localSplineVertices[i] = splineMeshPoints[i] - centroid;
+            localInnerSplineVertices[i] = innerSplinePoints[i] - centroid;
+            localInnermostSplineVertices[i] = innermostSplinePoints[i] - centroid;
         }
 
         // Add all loop vertices
@@ -643,9 +648,8 @@ public class LineMeshManager : MonoBehaviour
         // Otherwise, triangulate the innermost polygon.
         if (innermostLoopScale <= 0.001f) // Innermost loop collapses to centroid
         {
-            // Add centroid as the last vertex
-            // Now use finalizedMeshGameObject.transform for InverseTransformPoint
-            vertices.Add(finalizedMeshGameObject.transform.InverseTransformPoint(centroid));
+            // Add centroid as the last vertex, relative to the GameObject's new pivot
+            vertices.Add(Vector3.zero); // Centroid is now (0,0,0) in local space
             uvs.Add(new Vector2((centroid.x - minBounds.x) / rangeX, (centroid.z - minBounds.z) / rangeZ)); // UV for centroid
             int centroidIdx = vertices.Count - 1;
 
@@ -692,6 +696,10 @@ public class LineMeshManager : MonoBehaviour
         // MODIFIED: Integrate the new AddComponentsToMeshGameObject method
         AddComponentsToMeshGameObject(finalizedMeshGameObject);
         // ***************************************************************
+
+        // NEW: Spawn child objects
+        SpawnChildObjects(finalizedMeshGameObject);
+
 
         // The spawner's LineRenderer is now hidden, and its MeshRenderer is also hidden.
         // The new GameObject will display the mesh.
@@ -765,4 +773,30 @@ public class LineMeshManager : MonoBehaviour
         }
     }
     // ***************************************************************
+
+    // NEW: Method to spawn child objects
+    private void SpawnChildObjects(GameObject parentGameObject)
+    {
+        if (childPrefabsToSpawn == null || childPrefabsToSpawn.Length == 0)
+        {
+            Debug.Log("No child prefabs specified to spawn for " + parentGameObject.name);
+            return;
+        }
+
+        foreach (GameObject childPrefab in childPrefabsToSpawn)
+        {
+            if (childPrefab != null)
+            {
+                // Instantiate the prefab as a child of the generated mesh GameObject
+                // Position and rotation will be relative to the parent (0,0,0 and Quaternion.identity will place it at the parent's pivot)
+                GameObject newChild = Instantiate(childPrefab, parentGameObject.transform);
+                newChild.name = childPrefab.name + "_Child"; // Rename for clarity
+                Debug.Log($"Spawned child object '{newChild.name}' under {parentGameObject.name}.");
+            }
+            else
+            {
+                Debug.LogWarning("Skipping null child prefab in the 'Child Prefabs To Spawn' list.");
+            }
+        }
+    }
 }
