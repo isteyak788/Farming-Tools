@@ -318,7 +318,17 @@ public class ShapeMeshManager : MonoBehaviour
             Vector3 flatMouse = new Vector3(currentDragPoint.x, p1.y, currentDragPoint.z);
             float radius = Vector3.Distance(flatCenter, flatMouse);
 
-            pointsForSlopeCheck.Add(p1); // Center point
+            // Add the center point for slope check, ensuring its Y is correctly raycasted
+            RaycastHit centerHit;
+            Vector3 centerRayOrigin = new Vector3(p1.x, Camera.main.transform.position.y + 10f, p1.z);
+            if (Physics.Raycast(centerRayOrigin, Vector3.down, out centerHit, Mathf.Infinity, groundLayer))
+            {
+                pointsForSlopeCheck.Add(centerHit.point + Vector3.up * groundOffset);
+            }
+            else
+            {
+                pointsForSlopeCheck.Add(new Vector3(p1.x, p1.y, p1.z)); // Fallback
+            }
 
             int numCheckPoints = Mathf.Min(8, circleSegments);
             for (int i = 0; i < numCheckPoints; i++)
@@ -329,7 +339,7 @@ public class ShapeMeshManager : MonoBehaviour
 
                 // Raycast down from above to get the actual ground Y for slope check
                 Vector3 checkPointRayOrigin = new Vector3(x, Camera.main.transform.position.y + 10f, z);
-                RaycastHit hit;
+                RaycastHit hit; // Declare hit here
                 if (Physics.Raycast(checkPointRayOrigin, Vector3.down, out hit, Mathf.Infinity, groundLayer))
                 {
                     pointsForSlopeCheck.Add(hit.point + Vector3.up * groundOffset);
@@ -430,11 +440,21 @@ public class ShapeMeshManager : MonoBehaviour
         }
         else if (_activeDrawingType == DrawingType.Circle)
         {
+            // Add the center point for final slope check, ensuring its Y is correctly raycasted
+            RaycastHit centerHit;
+            Vector3 centerRayOrigin = new Vector3(p1.x, Camera.main.transform.position.y + 10f, p1.z);
+            if (Physics.Raycast(centerRayOrigin, Vector3.down, out centerHit, Mathf.Infinity, groundLayer))
+            {
+                pointsForFinalSlopeCheck.Add(centerHit.point + Vector3.up * groundOffset);
+            }
+            else
+            {
+                pointsForFinalSlopeCheck.Add(new Vector3(p1.x, p1.y, p1.z)); // Fallback
+            }
+
             Vector3 flatCenter = new Vector3(p1.x, p2.y, p1.z);
             Vector3 flatMouse = new Vector3(p2.x, p2.y, p2.z);
             float radius = Vector3.Distance(flatCenter, flatMouse);
-
-            pointsForFinalSlopeCheck.Add(p1); // Center point
 
             int numCheckPoints = Mathf.Min(8, circleSegments);
             for (int i = 0; i < numCheckPoints; i++)
@@ -444,7 +464,7 @@ public class ShapeMeshManager : MonoBehaviour
                 float z = p1.z + radius * Mathf.Sin(angle);
 
                 Vector3 checkPointRayOrigin = new Vector3(x, Camera.main.transform.position.y + 10f, z);
-                RaycastHit hit;
+                RaycastHit hit; // Declare hit here
                 if (Physics.Raycast(checkPointRayOrigin, Vector3.down, out hit, Mathf.Infinity, groundLayer))
                 {
                     pointsForFinalSlopeCheck.Add(hit.point + Vector3.up * groundOffset);
@@ -610,22 +630,37 @@ public class ShapeMeshManager : MonoBehaviour
         List<int> triangles = new List<int>();
         List<Vector2> uvs = new List<Vector2>();
 
-        vertices.Add(Vector3.zero); 
+        // For the center vertex (index 0), raycast to get the correct Y-position
+        Vector3 centerWorldPoint = centerPoint;
+        RaycastHit centerHit;
+        Vector3 centerRayOrigin = new Vector3(centerPoint.x, Camera.main.transform.position.y + 100f, centerPoint.z);
+        float raycastDistance = Camera.main.transform.position.y + 200f;
+
+        if (Physics.Raycast(centerRayOrigin, Vector3.down, out centerHit, raycastDistance, groundLayer))
+        {
+            centerWorldPoint.y = centerHit.point.y + groundOffset;
+        }
+        else
+        {
+            Debug.LogWarning($"Circle center point at X:{centerPoint.x}, Z:{centerPoint.z} did not hit ground during mesh generation. Point will use the y-coordinate of the initial center point.");
+            // Fallback to initial center point's Y if raycast fails, though this might still cause stretching if not on ground.
+            // A more robust fallback could be to use currentMousePoint.y or a predetermined ground level.
+        }
+        vertices.Add(relativeTransform.InverseTransformPoint(centerWorldPoint)); // Add the raycasted center vertex
         uvs.Add(new Vector2(0.5f, 0.5f)); 
 
-        for (int i = 0; i <= circleSegments; i++) 
+        for (int i = 1; i <= circleSegments; i++) 
         {
             float angle = (float)i / circleSegments * 2 * Mathf.PI;
             float x = centerPoint.x + radius * Mathf.Cos(angle);
             float z = centerPoint.z + radius * Mathf.Sin(angle);
 
-            Vector3 circlePointWorld = new Vector3(x, centerPoint.y, z); 
+            Vector3 circlePointWorld = new Vector3(x, centerPoint.y, z); // Initial Y can be centerPoint.y, will be overwritten by raycast
 
-            RaycastHit hit;
-            Vector3 rayOrigin = new Vector3(circlePointWorld.x, Camera.main.transform.position.y + 100f, circlePointWorld.z); 
-            float raycastDistance = Camera.main.transform.position.y + 200f;
-
-            if (Physics.Raycast(rayOrigin, Vector3.down, out hit, raycastDistance, groundLayer))
+            // Raycast down from above to get the actual ground Y for circumference points
+            Vector3 pointRayOrigin = new Vector3(circlePointWorld.x, Camera.main.transform.position.y + 100f, circlePointWorld.z); 
+            RaycastHit hit; // DECLARE HIT HERE
+            if (Physics.Raycast(pointRayOrigin, Vector3.down, out hit, raycastDistance, groundLayer))
             {
                 circlePointWorld.y = hit.point.y + groundOffset;
             }
