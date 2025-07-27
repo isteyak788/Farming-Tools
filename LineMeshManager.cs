@@ -70,6 +70,10 @@ public class LineMeshManager : MonoBehaviour
     public Component[] componentsToCopy;
     // ***************************************************************
 
+    // NEW: For CropManager specific copying
+    [Header("Crop Manager Template (Assign in Inspector)")]
+    [Tooltip("Drag the CropManager component from your template GameObject (e.g., LineMesh) here. Its settings will be copied to new meshes.")]
+    public CropManager cropManagerTemplate; // Assign the disabled CropManager here
 
     // Internal state for each LineMeshManager instance
     private List<Vector3> controlPoints = new List<Vector3>();
@@ -341,7 +345,7 @@ public class LineMeshManager : MonoBehaviour
             // But don't destroy the asset if it's already being used by a finalized mesh.
             if (meshFilter.mesh != null && meshFilter.mesh != finalizedMeshGameObject?.GetComponent<MeshFilter>()?.sharedMesh)
             {
-                 Destroy(meshFilter.mesh); // Destroy the old mesh asset ONLY if it's not the one already transferred
+                Destroy(meshFilter.mesh); // Destroy the old mesh asset ONLY if it's not the one already transferred
             }
             meshFilter.mesh = null; // Clear the spawner's mesh filter
         }
@@ -552,7 +556,7 @@ public class LineMeshManager : MonoBehaviour
         MeshRenderer newMeshRenderer = finalizedMeshGameObject.AddComponent<MeshRenderer>();
         // Add MeshCollider
         MeshCollider newMeshCollider = finalizedMeshGameObject.AddComponent<MeshCollider>();
-        newMeshCollider.convex = makeConvex; // Set convex based on the public variable [Cite: 1]
+        newMeshCollider.convex = makeConvex; // Set convex based on the public variable 
 
         // Set the position of the new GameObject to the calculated centroid.
         // This makes the centroid the pivot point of the GameObject.
@@ -575,7 +579,7 @@ public class LineMeshManager : MonoBehaviour
 
         // Add all loop vertices
         vertices.AddRange(localSplineVertices);          // Indices 0 to N-1
-        vertices.AddRange(localInnerSplineVertices);     // Indices N to 2N-1
+        vertices.AddRange(localInnerSplineVertices);      // Indices N to 2N-1
         vertices.AddRange(localInnermostSplineVertices); // Indices 2N to 3N-1
 
         // UV calculation (still based on XZ bounds)
@@ -693,7 +697,38 @@ public class LineMeshManager : MonoBehaviour
         }
 
         // ***************************************************************
+        // MODIFIED: Explicitly add and configure CropManager
+        // ***************************************************************
+        if (cropManagerTemplate != null)
+        {
+            CropManager newCropManager = finalizedMeshGameObject.AddComponent<CropManager>();
+            // Manually copy important public/serialized fields from the template
+            // Removed: newCropManager.assignPanelManager = cropManagerTemplate.assignPanelManager;
+            // CropManager now finds its own AssignPanelManager in Awake().
+
+            newCropManager.assignedCropType = cropManagerTemplate.assignedCropType;
+            // Create a new list for assignedFarmers to avoid modifying the template's list directly
+            newCropManager.assignedFarmers = new List<AIWorkState>(cropManagerTemplate.assignedFarmers); 
+            newCropManager.growthRate = cropManagerTemplate.growthRate;
+            newCropManager.currentGrowthDays = cropManagerTemplate.currentGrowthDays;
+            newCropManager.currentGrowthStageIndex = cropManagerTemplate.currentGrowthStageIndex;
+            newCropManager.isHarvestable = cropManagerTemplate.isHarvestable;
+            
+            // Set the CropManager's FieldID to the unique GameObject name
+            newCropManager.FieldID = finalizedMeshGameObject.name; 
+            Debug.Log($"LineMeshManager: Added CropManager to {finalizedMeshGameObject.name} with ID: {newCropManager.FieldID}");
+        }
+        else
+        {
+            Debug.LogWarning("CropManager Template is not assigned in LineMeshManager! Generated meshes will not have a pre-configured CropManager.", this);
+        }
+        // ***************************************************************
+
+        // ***************************************************************
         // MODIFIED: Integrate the new AddComponentsToMeshGameObject method
+        // ***************************************************************
+        // This call will now add *other* components specified in componentsToCopy,
+        // but CropManager is handled explicitly above.
         AddComponentsToMeshGameObject(finalizedMeshGameObject);
         // ***************************************************************
 
@@ -745,6 +780,13 @@ public class LineMeshManager : MonoBehaviour
             }
 
             Type componentType = sourceComponent.GetType();
+
+            // Skip CropManager if it's already explicitly added
+            if (componentType == typeof(CropManager))
+            {
+                Debug.Log($"Skipping CropManager in general 'Components To Copy' list for {targetGameObject.name} as it's handled explicitly.");
+                continue;
+            }
 
             // Ensure the source is a valid Unity Component type that can be added
             if (typeof(Component).IsAssignableFrom(componentType) && !componentType.IsAbstract && !componentType.IsInterface)
