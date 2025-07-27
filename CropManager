@@ -1,0 +1,350 @@
+// Assets/Scripts/CORE/farming/CropManager.cs
+using UnityEngine;
+using System.Collections.Generic;
+using System.Linq; // For OrderBy
+using System; // For [Serializable]
+
+
+public class CropManager : MonoBehaviour
+{
+    [Header("Field Configuration")]
+    [Tooltip("A unique identifier for this specific field. This will be set by the MeshGeneration script.")]
+    [SerializeField] // Keep private but show in Inspector
+    private string fieldID;
+
+    // Public getter and SETTER for FieldID
+    public string FieldID
+    {
+        get { return fieldID; }
+        set
+        {
+            if (fieldID != value) // Only update if value is different to avoid unnecessary debug logs
+            {
+                fieldID = value;
+                Debug.Log($"CropManager on {gameObject.name}: fieldID set to '{fieldID}' externally.");
+            }
+        }
+    }
+
+    [Tooltip("The CropType ScriptableObject currently assigned to this field.")]
+    public CropType assignedCropType;
+
+    [Tooltip("List of AIWorkState scripts representing farmers assigned to this field.")]
+    public List<AIWorkState> assignedFarmers = new List<AIWorkState>();
+
+    [SerializeField]
+    private AssignPanelManager assignPanelManager;
+
+    [Header("Growth Simulation")]
+    [Tooltip("Total game days passed since planting.")]
+    public float currentGrowthDays = 0f;
+    [Tooltip("The current growth stage index (0 = planted, 1 = mid, 2 = full, etc.).")]
+    public int currentGrowthStageIndex = 0;
+    public float growthRate = 1f; // How fast days accumulate
+    public bool isHarvestable = false;
+
+    [Header("Visuals (Managed Internally)")]
+    private GameObject currentCropVisual; // The currently active 3D model for the crop
+
+    // Pooling related fields
+    private Dictionary<GameObject, Queue<GameObject>> objectPools = new Dictionary<GameObject, Queue<GameObject>>();
+    private Transform pooledObjectsParent;
+
+    // Event for when a field needs to be assigned (e.g., UI updates)
+    public delegate void FieldAssignmentRequested(CropManager cropManager);
+    public static event FieldAssignmentRequested OnFieldAssignmentRequested;
+
+
+    void Awake()
+    {
+        // Debug.Log($"CropManager Awake for {gameObject.name}. (ID will be set by MeshGeneration)");
+
+        // Initialize crop data, perhaps to a default state
+        currentGrowthDays = 0f;
+        currentGrowthStageIndex = 0;
+        isHarvestable = false;
+
+        if (pooledObjectsParent == null)
+        {
+            GameObject parentGO = GameObject.Find("PooledObjects");
+            if (parentGO == null)
+            {
+                parentGO = new GameObject("PooledObjects");
+            }
+            pooledObjectsParent = parentGO.transform;
+        }
+
+        if (assignPanelManager == null)
+        {
+            assignPanelManager = FindAnyObjectByType<AssignPanelManager>();
+            if (assignPanelManager == null)
+            {
+                Debug.LogWarning("AssignPanelManager not found in scene. CropManager UI functionality might be limited.", this);
+            }
+        }
+    }
+
+    public void OpenAssignmentPanel()
+    {
+        Debug.Log($"CropManager on {gameObject.name} (ID: {FieldID}): Opening Assignment Panel.");
+
+        if (assignPanelManager != null)
+        {
+            assignPanelManager.OpenAssignPanel(FieldID, assignedCropType, assignedFarmers);
+        }
+        else
+        {
+            Debug.LogError($"AssignPanelManager reference is missing on CropManager for {gameObject.name}. Cannot open assignment panel.", this);
+            Debug.LogWarning("Fallback: AssignPanelManager is missing. Cannot open panel directly.");
+        }
+    }
+
+    public void CloseAssignmentPanel()
+    {
+        if (assignPanelManager != null)
+        {
+            assignPanelManager.CloseAssignPanel();
+        }
+        else
+        {
+            Debug.LogWarning("AssignPanelManager is missing. Cannot close panel.");
+        }
+    }
+
+
+    void Update()
+    {
+        if (assignedCropType != null && !isHarvestable)
+        {
+            currentGrowthDays += Time.deltaTime * growthRate;
+            UpdateGrowthVisuals();
+        }
+    }
+
+    private void UpdateGrowthVisuals()
+    {
+        if (assignedCropType == null) return;
+
+        float normalizedProgress = currentGrowthDays / assignedCropType.timeToGrowInDays;
+
+        CropType.GrowthStage currentStageData = null;
+        int bestStageIndex = -1;
+
+        var sortedStages = assignedCropType.growthStages?.OrderBy(s => s.threshold).ToList();
+
+        if (sortedStages == null || sortedStages.Count == 0)
+        {
+            // If no growth stages defined, just show planted model until harvestable
+            SetCurrentVisual(assignedCropType.plantedModel);
+            isHarvestable = normalizedProgress >= 1f;
+            return;
+        }
+
+        for (int i = 0; i < sortedStages.Count; i++)
+        {
+            if (normalizedProgress >= sortedStages[i].threshold)
+            {
+                currentStageData = sortedStages[i];
+                bestStageIndex = i;
+            }
+            else
+            {
+                break;
+            }
+        }
+
+        // Handle pre-growth models if any
+        if (normalizedProgress < sortedStages[0].threshold && assignedCropType.preGrowthModels != null && assignedCropType.preGrowthModels.Length > 0)
+        {
+            SetCurrentVisual(assignedCropType.preGrowthModels[0]);
+            currentGrowthStageIndex = -1; // Indicate pre-growth
+        }
+        else if (currentStageData != null) // If a specific growth stage is found
+        {
+            SetCurrentVisual(currentStageData.stagePrefab);
+            currentGrowthStageIndex = bestStageIndex;
+        }
+        else if (normalizedProgress >= 1f && assignedCropType.harvestedModel != null) // If fully grown and harvestable
+        {
+            SetCurrentVisual(assignedCropType.harvestedModel);
+            isHarvestable = true;
+            currentGrowthStageIndex = sortedStages.Count; // Indicate harvestable stage
+        }
+        else if (assignedCropType.plantedModel != null) // Fallback to planted model
+        {
+            SetCurrentVisual(assignedCropType.plantedModel);
+            currentGrowthStageIndex = 0;
+        }
+
+        if (normalizedProgress >= 1f)
+        {
+            isHarvestable = true;
+        }
+        else
+        {
+            isHarvestable = false;
+        }
+    }
+
+    private void SetCurrentVisual(GameObject newVisualPrefab)
+    {
+        if (currentCropVisual == newVisualPrefab) return;
+
+        if (currentCropVisual != null)
+        {
+            ReturnObject(currentCropVisual);
+            currentCropVisual = null;
+        }
+
+        if (newVisualPrefab != null)
+        {
+            currentCropVisual = GetObjectFromPool(newVisualPrefab);
+            currentCropVisual.transform.SetParent(this.transform);
+            currentCropVisual.transform.localPosition = Vector3.zero;
+            currentCropVisual.transform.localRotation = Quaternion.identity;
+            currentCropVisual.SetActive(true);
+        }
+    }
+
+
+    public void AssignCrop(CropType newCrop)
+    {
+        assignedCropType = newCrop;
+        currentGrowthDays = 0f;
+        currentGrowthStageIndex = 0;
+        isHarvestable = false;
+
+        if (assignedCropType != null && assignedCropType.plantedModel != null)
+        {
+            SetCurrentVisual(assignedCropType.plantedModel);
+        }
+        else
+        {
+            if (currentCropVisual != null)
+            {
+                ReturnObject(currentCropVisual);
+                currentCropVisual = null;
+            }
+        }
+
+        Debug.Log($"{gameObject.name} assigned new crop: {(newCrop != null ? newCrop.cropName : "None")}");
+        CloseAssignmentPanel();
+    }
+
+    public void Harvest()
+    {
+        if (isHarvestable)
+        {
+            Debug.Log($"Harvesting {assignedCropType.cropName} from {gameObject.name}.");
+
+            if (assignedCropType.harvestedModel != null)
+            {
+                SetCurrentVisual(assignedCropType.harvestedModel);
+            }
+            else
+            {
+                if (currentCropVisual != null)
+                {
+                    ReturnObject(currentCropVisual);
+                    currentCropVisual = null;
+                }
+            }
+
+            currentGrowthDays = 0f;
+            currentGrowthStageIndex = 0;
+            isHarvestable = false;
+            assignedCropType = null; // Clear assigned crop after harvest
+        }
+        else
+        {
+            Debug.Log($"{gameObject.name} is not yet harvestable.");
+        }
+    }
+
+    // --- Object Pooling Helper Methods ---
+    private GameObject GetObjectFromPool(GameObject prefab)
+    {
+        if (!objectPools.ContainsKey(prefab))
+        {
+            objectPools[prefab] = new Queue<GameObject>();
+        }
+
+        if (objectPools[prefab].Count > 0)
+        {
+            GameObject obj = objectPools[prefab].Dequeue();
+            obj.SetActive(true);
+            return obj;
+        }
+        else
+        {
+            GameObject newObj = Instantiate(prefab, pooledObjectsParent);
+            newObj.name = prefab.name + "_Pooled";
+            return newObj;
+        }
+    }
+
+    private void ReturnObject(GameObject obj)
+    {
+        if (obj == null) return;
+
+        // Try to determine the original prefab from the name or other characteristics
+        GameObject originalPrefab = null;
+
+        // Iterate through all possible prefabs from the assignedCropType
+        if (assignedCropType != null)
+        {
+            if (assignedCropType.plantedModel != null && obj.name.Contains(assignedCropType.plantedModel.name))
+            {
+                originalPrefab = assignedCropType.plantedModel;
+            }
+            else if (assignedCropType.harvestedModel != null && obj.name.Contains(assignedCropType.harvestedModel.name))
+            {
+                originalPrefab = assignedCropType.harvestedModel;
+            }
+            else if (assignedCropType.preGrowthModels != null)
+            {
+                foreach (var preModel in assignedCropType.preGrowthModels)
+                {
+                    if (preModel != null && obj.name.Contains(preModel.name))
+                    {
+                        originalPrefab = preModel;
+                        break;
+                    }
+                }
+            }
+            else if (assignedCropType.growthStages != null)
+            {
+                foreach (var stageData in assignedCropType.growthStages)
+                {
+                    if (stageData.stagePrefab != null && obj.name.Contains(stageData.stagePrefab.name))
+                    {
+                        originalPrefab = stageData.stagePrefab;
+                        break;
+                    }
+                }
+            }
+            else if (assignedCropType.postGrowthModels != null)
+            {
+                foreach (var postModel in assignedCropType.postGrowthModels)
+                {
+                    if (postModel != null && obj.name.Contains(postModel.name))
+                    {
+                        originalPrefab = postModel;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (originalPrefab != null && objectPools.ContainsKey(originalPrefab))
+        {
+            obj.SetActive(false);
+            objectPools[originalPrefab].Enqueue(obj);
+        }
+        else
+        {
+            // If we can't determine the original prefab or the pool doesn't exist, destroy it
+            Destroy(obj);
+        }
+    }
+}
