@@ -5,6 +5,9 @@ using UnityEngine.UI; // REQUIRED for Button type
 using System; // Required for Type
 using System.Collections; // Required for Coroutines
 
+// Ensure CropManager.cs is in a folder like Assets/Scripts/CORE/farming/
+// and that it matches the user-provided structure.
+
 [RequireComponent(typeof(MeshFilter), typeof(MeshRenderer))]
 public class ShapeMeshManager : MonoBehaviour
 {
@@ -68,6 +71,15 @@ public class ShapeMeshManager : MonoBehaviour
     [Header("Dynamic Components")]
     [Tooltip("Drag and drop components (e.g., Rigidbody, Collider, your custom scripts) from other GameObjects here. Their type and *serializable* data will be copied to the generated mesh. Note: Only serializable fields will be copied.")]
     public Component[] componentsToCopy;
+
+    // IMPORTANT CHANGE: This field will now be the *prototype* CropManager
+    // or simply indicates that a CropManager *should* be added to the generated mesh.
+    // We are no longer linking to a "central" CropManager from here for ID assignment,
+    // as each generated mesh will get its own CropManager instance based on your script.
+    [Header("Crop Management")]
+    [Tooltip("If checked, a CropManager component will be added to the newly generated mesh GameObject.")]
+    public bool addCropManagerToGeneratedMesh = true;
+
 
     // Internal state for drawing
     private Vector3? startDragPoint = null;
@@ -221,7 +233,7 @@ public class ShapeMeshManager : MonoBehaviour
                     // For finalization, use the _lastValidEndDragPoint if it's currently invalid,
                     // otherwise use the current endDragPoint.
                     Vector3 endDragPointForFinalization = _isCurrentlyInvalidSlope ? _lastValidEndDragPoint : (hit.point + Vector3.up * groundOffset);
-                    
+
                     FinalizeShapeMesh(startDragPoint.Value, endDragPointForFinalization);
                     CleanupDrawingSession(); // New method to clean up all session state
                     Debug.Log($"{_activeDrawingType} drawing session ended.");
@@ -339,7 +351,7 @@ public class ShapeMeshManager : MonoBehaviour
 
                 // Raycast down from above to get the actual ground Y for slope check
                 Vector3 checkPointRayOrigin = new Vector3(x, Camera.main.transform.position.y + 10f, z);
-                RaycastHit hit; // Declare hit here
+                RaycastHit hit;
                 if (Physics.Raycast(checkPointRayOrigin, Vector3.down, out hit, Mathf.Infinity, groundLayer))
                 {
                     pointsForSlopeCheck.Add(hit.point + Vector3.up * groundOffset);
@@ -464,7 +476,7 @@ public class ShapeMeshManager : MonoBehaviour
                 float z = p1.z + radius * Mathf.Sin(angle);
 
                 Vector3 checkPointRayOrigin = new Vector3(x, Camera.main.transform.position.y + 10f, z);
-                RaycastHit hit; // Declare hit here
+                RaycastHit hit;
                 if (Physics.Raycast(checkPointRayOrigin, Vector3.down, out hit, Mathf.Infinity, groundLayer))
                 {
                     pointsForFinalSlopeCheck.Add(hit.point + Vector3.up * groundOffset);
@@ -493,9 +505,9 @@ public class ShapeMeshManager : MonoBehaviour
             return;
         }
 
-
         // Proceed with creating the mesh only if the slope is valid at the point of release
-        GameObject finalizedMeshGameObject = new GameObject("GeneratedMesh_" + _activeDrawingType.ToString() + "_" + System.DateTime.Now.ToString("HHmmss"));
+        string uniqueMeshID = "GeneratedMesh_" + _activeDrawingType.ToString() + "_" + System.DateTime.Now.ToString("yyyyMMdd_HHmmss_fff"); // More robust unique ID
+        GameObject finalizedMeshGameObject = new GameObject(uniqueMeshID);
         MeshFilter newMeshFilter = finalizedMeshGameObject.AddComponent<MeshFilter>();
         MeshRenderer newMeshRenderer = finalizedMeshGameObject.AddComponent<MeshRenderer>();
         MeshCollider newMeshCollider = finalizedMeshGameObject.AddComponent<MeshCollider>();
@@ -506,11 +518,11 @@ public class ShapeMeshManager : MonoBehaviour
         if (_activeDrawingType == DrawingType.Box)
         {
             shapeCenterWorld = (p1 + p2) / 2f;
-            shapeCenterWorld.y = (p1.y + p2.y) / 2f; 
+            shapeCenterWorld.y = (p1.y + p2.y) / 2f;
         }
         else // Circle
         {
-            shapeCenterWorld = p1; 
+            shapeCenterWorld = p1;
         }
 
         // Set the GameObject's position to the calculated center of the shape
@@ -546,6 +558,8 @@ public class ShapeMeshManager : MonoBehaviour
             {
                 if (childPrefab != null)
                 {
+                    // Instantiate the prefab as a child of the generated mesh GameObject
+                    // Position and rotation will be relative to the parent (0,0,0 and Quaternion.identity will place it at the parent's pivot)
                     GameObject childInstance = Instantiate(childPrefab, finalizedMeshGameObject.transform);
                     childInstance.transform.localPosition = Vector3.zero; // Place at the parent's pivot by default
                     childInstance.transform.localRotation = Quaternion.identity;
@@ -557,6 +571,22 @@ public class ShapeMeshManager : MonoBehaviour
                 }
             }
         }
+
+        // Add CropManager component to the generated mesh GameObject and set its FieldID
+        if (addCropManagerToGeneratedMesh)
+        {
+            CropManager newCropManager = finalizedMeshGameObject.AddComponent<CropManager>();
+            if (newCropManager != null)
+            {
+                newCropManager.FieldID = uniqueMeshID; // Set the FieldID using the public setter
+                Debug.Log($"Added CropManager to '{finalizedMeshGameObject.name}' and set its FieldID to '{newCropManager.FieldID}'.");
+            }
+            else
+            {
+                Debug.LogError($"Failed to add CropManager component to '{finalizedMeshGameObject.name}'.");
+            }
+        }
+
 
         Debug.Log(finalizedMeshGameObject.name + " generated with " + newMeshFilter.mesh.vertexCount + " vertices and " + newMeshFilter.mesh.triangles.Length / 3 + " triangles." +
                   $" Pivot set to center at world position: {finalizedMeshGameObject.transform.position}");
@@ -622,7 +652,7 @@ public class ShapeMeshManager : MonoBehaviour
 
     private void GenerateCircleMesh(Mesh mesh, Vector3 centerPoint, Vector3 currentMousePoint, Transform relativeTransform, bool isPreview)
     {
-        Vector3 flatCenter = new Vector3(centerPoint.x, currentMousePoint.y, centerPoint.z); 
+        Vector3 flatCenter = new Vector3(centerPoint.x, currentMousePoint.y, centerPoint.z);
         Vector3 flatMouse = new Vector3(currentMousePoint.x, currentMousePoint.y, currentMousePoint.z);
         float radius = Vector3.Distance(flatCenter, flatMouse);
 
@@ -647,9 +677,9 @@ public class ShapeMeshManager : MonoBehaviour
             // A more robust fallback could be to use currentMousePoint.y or a predetermined ground level.
         }
         vertices.Add(relativeTransform.InverseTransformPoint(centerWorldPoint)); // Add the raycasted center vertex
-        uvs.Add(new Vector2(0.5f, 0.5f)); 
+        uvs.Add(new Vector2(0.5f, 0.5f));
 
-        for (int i = 1; i <= circleSegments; i++) 
+        for (int i = 1; i <= circleSegments; i++)
         {
             float angle = (float)i / circleSegments * 2 * Mathf.PI;
             float x = centerPoint.x + radius * Mathf.Cos(angle);
@@ -658,8 +688,8 @@ public class ShapeMeshManager : MonoBehaviour
             Vector3 circlePointWorld = new Vector3(x, centerPoint.y, z); // Initial Y can be centerPoint.y, will be overwritten by raycast
 
             // Raycast down from above to get the actual ground Y for circumference points
-            Vector3 pointRayOrigin = new Vector3(circlePointWorld.x, Camera.main.transform.position.y + 100f, circlePointWorld.z); 
-            RaycastHit hit; // DECLARE HIT HERE
+            Vector3 pointRayOrigin = new Vector3(circlePointWorld.x, Camera.main.transform.position.y + 100f, circlePointWorld.z);
+            RaycastHit hit;
             if (Physics.Raycast(pointRayOrigin, Vector3.down, out hit, raycastDistance, groundLayer))
             {
                 circlePointWorld.y = hit.point.y + groundOffset;
@@ -678,7 +708,7 @@ public class ShapeMeshManager : MonoBehaviour
         for (int i = 1; i <= circleSegments; i++)
         {
             int currentOuter = i;
-            int nextOuter = (i == circleSegments) ? 1 : i + 1; 
+            int nextOuter = (i == circleSegments) ? 1 : i + 1;
 
             if (!invertMesh)
             {
@@ -725,6 +755,7 @@ public class ShapeMeshManager : MonoBehaviour
                 try
                 {
                     Component newComponent = targetGameObject.AddComponent(componentType);
+                    // Use JsonUtility to copy serializable fields if applicable
                     string jsonData = JsonUtility.ToJson(sourceComponent);
                     JsonUtility.FromJsonOverwrite(jsonData, newComponent);
                     Debug.Log($"Added component '{componentType.Name}' to {targetGameObject.name} and attempted to copy its serializable data.");
